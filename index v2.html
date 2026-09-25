@@ -1,0 +1,1746 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, user-scalable=no" />
+<title>Gqeberha Garden</title>
+
+<!-- Home-screen install support (iOS Safari + Android Chrome) -->
+<meta name="apple-mobile-web-app-capable" content="yes" />
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+<meta name="apple-mobile-web-app-title" content="My Garden" />
+<meta name="theme-color" content="#7C8A6E" />
+<link rel="apple-touch-icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'%3E%3Crect width='100' height='100' rx='22' fill='%237C8A6E'/%3E%3Cpath d='M50 78 C50 55 40 40 22 30 C22 55 32 70 50 78 Z' fill='%23F5F6EF'/%3E%3Cpath d='M50 78 C50 50 62 32 82 24 C84 52 70 68 50 78 Z' fill='%23C08A34'/%3E%3C/svg%3E" />
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'%3E%3Crect width='100' height='100' rx='22' fill='%237C8A6E'/%3E%3Cpath d='M50 78 C50 55 40 40 22 30 C22 55 32 70 50 78 Z' fill='%23F5F6EF'/%3E%3Cpath d='M50 78 C50 50 62 32 82 24 C84 52 70 68 50 78 Z' fill='%23C08A34'/%3E%3C/svg%3E" />
+<link rel="manifest" href="data:application/manifest+json,{
+  %22name%22: %22Gqeberha Garden%22,
+  %22short_name%22: %22My Garden%22,
+  %22start_url%22: %22.%22,
+  %22display%22: %22standalone%22,
+  %22background_color%22: %22%23E9EDE1%22,
+  %22theme_color%22: %22%237C8A6E%22
+}" />
+
+<style>
+  * { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
+  html, body, #root { height: 100%; margin: 0; }
+  body {
+    background: #E9EDE1;
+    overscroll-behavior-y: none;
+  }
+  input, textarea, button { font-family: inherit; }
+</style>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/react/18.2.0/umd/react.production.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/react-dom/18.2.0/umd/react-dom.production.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/babel-standalone/7.23.5/babel.min.js"></script>
+</head>
+<body>
+<div id="root"></div>
+
+<script type="text/babel" data-presets="react">
+const { useState, useEffect, useMemo, useCallback } = React;
+
+/* ===========================================================
+   Shared tokens, helpers
+=========================================================== */
+const COLORS = {
+  bg: "#E9EDE1",
+  card: "#F5F6EF",
+  ink: "#2A2E22",
+  inkSoft: "#5B6350",
+  clay: "#A8562E",
+  sage: "#7C8A6E",
+  gold: "#C08A34",
+  line: "#D3D8C6",
+  danger: "#B24444",
+};
+
+const HEALTH_LEVELS = [
+  { key: "thriving", label: "Thriving", color: "#5C8A4A" },
+  { key: "healthy", label: "Healthy", color: "#7C8A6E" },
+  { key: "stressed", label: "Stressed", color: "#C08A34" },
+  { key: "struggling", label: "Struggling", color: "#A8562E" },
+];
+function healthMeta(key) {
+  return HEALTH_LEVELS.find((h) => h.key === key) || HEALTH_LEVELS[1];
+}
+function uid() {
+  return Math.random().toString(36).slice(2, 10) + Date.now().toString(36);
+}
+// 0 -> "A", 25 -> "Z", 26 -> "AA", ... used to label individual plants within
+// a variety group. Never reused once assigned, even if an earlier one is removed.
+function indexToLetter(index) {
+  let n = index, letters = "";
+  do {
+    letters = String.fromCharCode(65 + (n % 26)) + letters;
+    n = Math.floor(n / 26) - 1;
+  } while (n >= 0);
+  return letters;
+}
+function todayLabel() {
+  return new Date().toLocaleDateString("en-ZA", { weekday: "long", day: "numeric", month: "long" });
+}
+function readFileAsDataUrl(file) {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => resolve(reader.result);
+    reader.onerror = () => reject(reader.error);
+    reader.readAsDataURL(file);
+  });
+}
+
+/* ===========================================================
+   Storage helpers — shared across Home + Tracker screens.
+   Uses Claude's window.storage when this runs inside a Claude.ai
+   artifact preview, and falls back to plain localStorage when
+   installed standalone (home screen / any other browser) —
+   which is the normal case once this is out of the chat preview.
+=========================================================== */
+const storage = (typeof window !== "undefined" && window.storage) ? window.storage : {
+  async get(key) {
+    try {
+      const v = localStorage.getItem(key);
+      return v === null ? null : { key, value: v };
+    } catch { return null; }
+  },
+  async set(key, value) {
+    localStorage.setItem(key, value); // let quota/errors throw so callers can surface them
+    return { key, value };
+  },
+  async delete(key) {
+    try { localStorage.removeItem(key); return { key, deleted: true }; } catch { return null; }
+  },
+};
+
+async function loadIndex() {
+  try {
+    const res = await storage.get("plant-index");
+    return res ? JSON.parse(res.value) : [];
+  } catch { return []; }
+}
+async function saveIndex(index) {
+  await storage.set("plant-index", JSON.stringify(index));
+}
+async function loadPlant(id) {
+  try {
+    const res = await storage.get(`plant:${id}`);
+    return res ? JSON.parse(res.value) : null;
+  } catch { return null; }
+}
+async function savePlant(plant) {
+  await storage.set(`plant:${plant.id}`, JSON.stringify(plant));
+}
+function newPlant(name) {
+  return {
+    id: uid(), name, health: "healthy", lastWatered: null, plantedDate: null,
+    pests: [], logs: [], notes: "", varieties: [],
+  };
+}
+function compressImage(file, maxDim = 640, quality = 0.8) {
+  return new Promise((resolve) => {
+    const reader = new FileReader();
+    reader.onload = () => {
+      const img = new Image();
+      img.onload = () => {
+        let { width, height } = img;
+        if (width > maxDim || height > maxDim) {
+          if (width > height) { height = Math.round(height * (maxDim / width)); width = maxDim; }
+          else { width = Math.round(width * (maxDim / height)); height = maxDim; }
+        }
+        const canvas = document.createElement("canvas");
+        canvas.width = width; canvas.height = height;
+        canvas.getContext("2d").drawImage(img, 0, 0, width, height);
+        resolve(canvas.toDataURL("image/jpeg", quality));
+      };
+      img.onerror = () => resolve(reader.result); // fall back to the original if resizing fails
+      img.src = reader.result;
+    };
+    reader.onerror = () => resolve(null);
+    reader.readAsDataURL(file);
+  });
+}
+async function exportGardenData() {
+  const index = await loadIndex();
+  const plants = await Promise.all(index.map((p) => loadPlant(p.id)));
+  const payload = { exportedAt: new Date().toISOString(), plants: plants.filter(Boolean) };
+  const blob = new Blob([JSON.stringify(payload, null, 2)], { type: "application/json" });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = `gqeberha-garden-backup-${new Date().toISOString().slice(0, 10)}.json`;
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  URL.revokeObjectURL(url);
+}
+
+/* ===========================================================
+   Seasons — order as experienced in the year (Southern Hemisphere:
+   Dec–Feb summer, Mar–May autumn, Jun–Aug winter, Sep–Nov spring)
+=========================================================== */
+const SEASON_ORDER = ["summer", "autumn", "winter", "spring"];
+const SEASON_LABELS = { summer: "Summer", autumn: "Autumn", winter: "Winter", spring: "Spring" };
+function seasonFromMonth(month) {
+  if (month === 11 || month === 0 || month === 1) return "summer";
+  if (month >= 2 && month <= 4) return "autumn";
+  if (month >= 5 && month <= 7) return "winter";
+  return "spring"; // 8, 9, 10
+}
+function currentSeason() {
+  return seasonFromMonth(new Date().getMonth());
+}
+async function loadSeasonHistory() {
+  try {
+    const res = await storage.get("season-history");
+    return res ? JSON.parse(res.value) : [];
+  } catch { return []; }
+}
+async function saveSeasonHistory(history) {
+  await storage.set("season-history", JSON.stringify(history));
+}
+// Records/updates a planting entry for a plant group so its crop stays
+// on the seasonal guide even if the plant group is later removed.
+async function recordSeasonPlanting(plant) {
+  if (!plant || !plant.plantedDate) return;
+  const season = seasonFromMonth(new Date(plant.plantedDate).getMonth());
+  const history = await loadSeasonHistory();
+  const idx = history.findIndex((h) => h.plantId === plant.id);
+  const entry = { plantId: plant.id, cropName: plant.name, season, plantedDate: plant.plantedDate };
+  if (idx >= 0) history[idx] = entry; else history.push(entry);
+  await saveSeasonHistory(history);
+}
+// Keeps a plant's crop name in sync on the seasonal guide after a rename.
+async function renameSeasonHistoryEntry(plantId, newName) {
+  const history = await loadSeasonHistory();
+  const idx = history.findIndex((h) => h.plantId === plantId);
+  if (idx < 0) return;
+  history[idx] = { ...history[idx], cropName: newName };
+  await saveSeasonHistory(history);
+}
+
+/* ===========================================================
+   Harvest log — an append-only ledger of what's been picked and
+   when, kept independently of the tracked plant groups so it
+   survives a plant group being renamed or removed later.
+=========================================================== */
+async function loadHarvestLog() {
+  try {
+    const res = await storage.get("harvest-log");
+    return res ? JSON.parse(res.value) : [];
+  } catch { return []; }
+}
+async function saveHarvestLog(log) {
+  await storage.set("harvest-log", JSON.stringify(log));
+}
+async function addHarvestEntry(entry) {
+  const log = await loadHarvestLog();
+  log.push(entry);
+  await saveHarvestLog(log);
+  return log;
+}
+async function deleteHarvestEntry(id) {
+  const log = await loadHarvestLog();
+  const filtered = log.filter((e) => e.id !== id);
+  await saveHarvestLog(filtered);
+  return filtered;
+}
+// Keeps a crop's name in sync in the harvest log after a plant group rename.
+async function renameHarvestPlantName(plantId, newName) {
+  const log = await loadHarvestLog();
+  let changed = false;
+  const updated = log.map((e) => {
+    if (e.plantId === plantId && e.plantName !== newName) { changed = true; return { ...e, plantName: newName }; }
+    return e;
+  });
+  if (changed) await saveHarvestLog(updated);
+}
+
+/* ===========================================================
+   Weather + "what thrives now" — Port Elizabeth (Gqeberha)
+=========================================================== */
+const LAT = -33.9608, LON = 25.6022;
+
+const PLANT_CALENDAR = {
+  0: { season: "High summer", crops: ["Tomatoes", "Peppers & chillies", "Cucumbers", "Beans", "Sweetcorn", "Basil", "Heat-tolerant lettuce"] },
+  1: { season: "Late summer", crops: ["Squash & marrows", "Beans", "Spinach", "Beetroot", "Carrots", "Cabbage (tray sow)"] },
+  2: { season: "Early autumn", crops: ["Onion seedlings", "Spinach", "Kale", "Turnips", "Broccoli", "Beetroot"] },
+  3: { season: "Autumn", crops: ["Carrots", "Beetroot", "Broad beans", "Swiss chard", "Winter lettuce"] },
+  4: { season: "Late autumn", crops: ["Garlic", "Turnips", "Spinach", "Broad beans", "Peas"] },
+  5: { season: "Early winter", crops: ["Broad beans", "Beetroot", "Broccoli", "Cabbage", "Cauliflower", "Carrots", "Kale"] },
+  6: { season: "Mid-winter", crops: ["Beetroot", "Broccoli", "Carrot", "Kale", "Kohlrabi", "Onion", "Spinach", "Turnip", "Peas"] },
+  7: { season: "Late winter", crops: ["Leeks", "Lettuce", "Parsley", "Radish", "Peas", "Early tomatoes (tray sow)"] },
+  8: { season: "Early spring", crops: ["Beans", "Sweetcorn", "Cucumbers", "Squash", "Lettuce", "Carrots"] },
+  9: { season: "Spring", crops: ["Tomatoes", "Beetroot", "Beans", "Sweetcorn", "Basil"] },
+  10: { season: "Late spring", crops: ["Tomatoes", "Peppers", "Cucumbers", "Sweetcorn", "Squash", "Basil"] },
+  11: { season: "Early summer", crops: ["Tomatoes", "Peppers & chillies", "Beans", "Cucumbers", "Sweetcorn", "Basil"] },
+};
+
+// Extra guidance for the "What thrives right now" cards: an easy variety to
+// start with, a rough size/space category, and a simple line-icon (no photos,
+// so this keeps working without a live image fetch).
+const CROP_DETAILS = [
+  { name: "Broad beans", keywords: ["broad bean"], easiestVariety: "'Aquadulce Claudia'", size: "Medium — tall, benefits from support", icon: "pod" },
+  { name: "Beans", keywords: ["bean"], easiestVariety: "Dwarf/bush bean ('Contender')", size: "Compact — no staking needed", icon: "pod" },
+  { name: "Peppers & chillies", keywords: ["pepper", "chilli", "chili"], easiestVariety: "Jalapeño or 'California Wonder' bell", size: "Compact — pot-friendly", icon: "bush" },
+  { name: "Cucumbers", keywords: ["cucumber"], easiestVariety: "Bush type ('Bush Champion')", size: "Medium — sprawls or trellises", icon: "vine" },
+  { name: "Sweetcorn", keywords: ["corn", "maize"], easiestVariety: "'Golden Bantam'", size: "Large — plant in blocks, not rows", icon: "stalk" },
+  { name: "Basil", keywords: ["basil"], easiestVariety: "Sweet basil ('Genovese')", size: "Compact — great in a pot", icon: "herb" },
+  { name: "Squash & marrows", keywords: ["squash", "marrow"], easiestVariety: "Baby marrow/courgette", size: "Large — sprawling vines", icon: "vine" },
+  { name: "Tomatoes", keywords: ["tomato"], easiestVariety: "Cherry tomato ('Sweet 100')", size: "Medium — needs staking or a cage", icon: "vine" },
+  { name: "Lettuce", keywords: ["lettuce"], easiestVariety: "Loose-leaf mix", size: "Compact", icon: "leafy" },
+  { name: "Spinach", keywords: ["spinach"], easiestVariety: "Perpetual spinach", size: "Compact", icon: "leafy" },
+  { name: "Swiss chard", keywords: ["chard"], easiestVariety: "'Fordhook Giant'", size: "Medium", icon: "leafy" },
+  { name: "Kale", keywords: ["kale"], easiestVariety: "Curly kale", size: "Compact–Medium", icon: "leafy" },
+  { name: "Cabbage", keywords: ["cabbage"], easiestVariety: "'Golden Acre'", size: "Medium", icon: "leafy" },
+  { name: "Beetroot", keywords: ["beetroot", "beet"], easiestVariety: "'Detroit Dark Red'", size: "Compact", icon: "root" },
+  { name: "Carrots", keywords: ["carrot"], easiestVariety: "'Chantenay' (short, stump-rooted)", size: "Compact — good in containers", icon: "root" },
+  { name: "Turnips", keywords: ["turnip"], easiestVariety: "'Purple Top White Globe'", size: "Compact", icon: "root" },
+  { name: "Radish", keywords: ["radish"], easiestVariety: "'French Breakfast'", size: "Compact — fast and easy", icon: "root" },
+  { name: "Onion", keywords: ["onion"], easiestVariety: "'Texas Grano'", size: "Compact", icon: "bulb" },
+  { name: "Garlic", keywords: ["garlic"], easiestVariety: "Any locally available softneck cloves", size: "Compact", icon: "bulb" },
+  { name: "Kohlrabi", keywords: ["kohlrabi"], easiestVariety: "'Purple Vienna'", size: "Compact", icon: "bulb" },
+  { name: "Leeks", keywords: ["leek"], easiestVariety: "'Musselburgh'", size: "Compact — narrow and upright", icon: "stalk" },
+  { name: "Parsley", keywords: ["parsley"], easiestVariety: "Flat-leaf (Italian) parsley", size: "Compact — great in a pot", icon: "herb" },
+  { name: "Broccoli", keywords: ["broccoli"], easiestVariety: "'Calabrese'", size: "Medium", icon: "bud" },
+  { name: "Cauliflower", keywords: ["cauliflower"], easiestVariety: "'Snowball'", size: "Medium–Large", icon: "bud" },
+  { name: "Peas", keywords: ["pea"], easiestVariety: "'Sugar Snap'", size: "Medium — needs a trellis", icon: "pod" },
+];
+function findCropDetails(label) {
+  const name = label.toLowerCase();
+  return CROP_DETAILS.find((c) => c.keywords.some((k) => name.includes(k)));
+}
+function CropIcon({ type }) {
+  const stroke = COLORS.ink;
+  const common = { fill: "none", stroke, strokeWidth: 1.6, strokeLinecap: "round", strokeLinejoin: "round" };
+  if (type === "leafy") {
+    return (
+      <svg width="30" height="30" viewBox="0 0 30 30">
+        <path d="M15 25 V14" {...common} stroke={COLORS.sage} />
+        <path d="M15 15 C15 8 8 6 4 6 C4 13 8 17 15 15 Z" fill={COLORS.sage} opacity="0.85" />
+        <path d="M15 17 C15 11 21 8 25 8 C25 15 21 18 15 17 Z" fill={COLORS.sage} opacity="0.55" />
+      </svg>
+    );
+  }
+  if (type === "root") {
+    return (
+      <svg width="30" height="30" viewBox="0 0 30 30">
+        <path d="M12 8 L11 4 M15 8 L15 3 M18 8 L19 4" stroke={COLORS.sage} strokeWidth="1.6" strokeLinecap="round" fill="none" />
+        <path d="M15 8 C22 8 22 16 18 22 C16 25 14 25 12 22 C8 16 8 8 15 8 Z" fill={COLORS.clay} opacity="0.85" />
+      </svg>
+    );
+  }
+  if (type === "bulb") {
+    return (
+      <svg width="30" height="30" viewBox="0 0 30 30">
+        <path d="M15 9 C15 6 13 4 13 3 M15 9 C15 6 17 4 17 3" stroke={COLORS.sage} strokeWidth="1.6" strokeLinecap="round" fill="none" />
+        <path d="M15 9 C21 9 22 16 19 21 C17.5 24 12.5 24 11 21 C8 16 9 9 15 9 Z" fill={COLORS.gold} opacity="0.8" />
+        <path d="M15 9 V22" stroke={COLORS.card} strokeWidth="1" opacity="0.6" />
+      </svg>
+    );
+  }
+  if (type === "pod") {
+    return (
+      <svg width="30" height="30" viewBox="0 0 30 30">
+        <path d="M6 20 C6 10 24 8 25 8 C25 20 12 24 6 20 Z" fill={COLORS.sage} opacity="0.75" {...common} stroke={COLORS.sage} />
+        <circle cx="12" cy="17" r="1.6" fill={COLORS.card} />
+        <circle cx="16" cy="14" r="1.6" fill={COLORS.card} />
+        <circle cx="20" cy="11" r="1.6" fill={COLORS.card} />
+      </svg>
+    );
+  }
+  if (type === "vine") {
+    return (
+      <svg width="30" height="30" viewBox="0 0 30 30">
+        <path d="M5 24 C10 20 9 14 15 12 C21 10 20 5 25 4" stroke={COLORS.sage} strokeWidth="1.6" fill="none" strokeLinecap="round" />
+        <circle cx="14" cy="17" r="4" fill={COLORS.clay} opacity="0.85" />
+        <path d="M17 5 C15 6 15 8 17 9" stroke={COLORS.sage} strokeWidth="1.4" fill="none" strokeLinecap="round" />
+      </svg>
+    );
+  }
+  if (type === "bush") {
+    return (
+      <svg width="30" height="30" viewBox="0 0 30 30">
+        <path d="M15 25 V17" stroke={COLORS.sage} strokeWidth="1.6" strokeLinecap="round" />
+        <circle cx="10" cy="12" r="6" fill={COLORS.sage} opacity="0.6" />
+        <circle cx="18" cy="10" r="6.5" fill={COLORS.sage} opacity="0.8" />
+        <circle cx="14" cy="16" r="5" fill={COLORS.sage} opacity="0.7" />
+        <circle cx="19" cy="15" r="1.7" fill={COLORS.clay} />
+      </svg>
+    );
+  }
+  if (type === "stalk") {
+    return (
+      <svg width="30" height="30" viewBox="0 0 30 30">
+        <path d="M15 26 V6" stroke={COLORS.sage} strokeWidth="1.8" strokeLinecap="round" />
+        <path d="M15 10 C11 9 9 6 9 4 M15 14 C19 13 21 10 21 8 M15 18 C11 17 9 15 9 13" stroke={COLORS.sage} strokeWidth="1.4" fill="none" strokeLinecap="round" />
+      </svg>
+    );
+  }
+  if (type === "bud") {
+    return (
+      <svg width="30" height="30" viewBox="0 0 30 30">
+        <path d="M15 26 V18" stroke={COLORS.sage} strokeWidth="1.8" strokeLinecap="round" />
+        <circle cx="10" cy="12" r="4.5" fill={COLORS.sage} opacity="0.6" />
+        <circle cx="15" cy="9" r="5.5" fill={COLORS.sage} opacity="0.85" />
+        <circle cx="20" cy="12" r="4.5" fill={COLORS.sage} opacity="0.6" />
+      </svg>
+    );
+  }
+  // herb — default
+  return (
+    <svg width="30" height="30" viewBox="0 0 30 30">
+      <path d="M15 26 V12" stroke={COLORS.sage} strokeWidth="1.6" strokeLinecap="round" />
+      <path d="M15 18 C11 17 9 14 9 12 M15 15 C19 14 21 11 21 9 M15 21 C11 20 8 18 8 16" stroke={COLORS.sage} strokeWidth="1.3" fill="none" strokeLinecap="round" />
+    </svg>
+  );
+}
+
+const WEATHER_CODES = {
+  0: { label: "Clear sky", icon: "sun" }, 1: { label: "Mostly clear", icon: "sun" },
+  2: { label: "Partly cloudy", icon: "cloud-sun" }, 3: { label: "Overcast", icon: "cloud" },
+  45: { label: "Foggy", icon: "cloud" }, 48: { label: "Foggy", icon: "cloud" },
+  51: { label: "Light drizzle", icon: "rain" }, 53: { label: "Drizzle", icon: "rain" }, 55: { label: "Heavy drizzle", icon: "rain" },
+  61: { label: "Light rain", icon: "rain" }, 63: { label: "Rain", icon: "rain" }, 65: { label: "Heavy rain", icon: "rain" },
+  71: { label: "Light snow", icon: "rain" }, 80: { label: "Rain showers", icon: "rain" }, 81: { label: "Rain showers", icon: "rain" },
+  82: { label: "Heavy showers", icon: "rain" }, 95: { label: "Thunderstorm", icon: "storm" },
+};
+
+function WeatherIcon({ kind }) {
+  const stroke = COLORS.ink;
+  if (kind === "sun") {
+    return (
+      <svg width="40" height="40" viewBox="0 0 40 40" fill="none">
+        <circle cx="20" cy="20" r="8" fill={COLORS.gold} />
+        {[...Array(8)].map((_, i) => {
+          const a = (i * Math.PI) / 4;
+          const x1 = 20 + Math.cos(a) * 13, y1 = 20 + Math.sin(a) * 13;
+          const x2 = 20 + Math.cos(a) * 18, y2 = 20 + Math.sin(a) * 18;
+          return <line key={i} x1={x1} y1={y1} x2={x2} y2={y2} stroke={COLORS.gold} strokeWidth="2" strokeLinecap="round" />;
+        })}
+      </svg>
+    );
+  }
+  if (kind === "cloud-sun") {
+    return (
+      <svg width="40" height="40" viewBox="0 0 40 40" fill="none">
+        <circle cx="15" cy="16" r="6" fill={COLORS.gold} />
+        <ellipse cx="22" cy="24" rx="12" ry="8" fill={COLORS.card} stroke={stroke} strokeWidth="1.5" />
+      </svg>
+    );
+  }
+  if (kind === "rain") {
+    return (
+      <svg width="40" height="40" viewBox="0 0 40 40" fill="none">
+        <ellipse cx="20" cy="16" rx="13" ry="8" fill={COLORS.card} stroke={stroke} strokeWidth="1.5" />
+        {[13, 20, 27].map((x, i) => (
+          <line key={i} x1={x} y1="26" x2={x - 3} y2="34" stroke={COLORS.sage} strokeWidth="2" strokeLinecap="round" />
+        ))}
+      </svg>
+    );
+  }
+  if (kind === "storm") {
+    return (
+      <svg width="40" height="40" viewBox="0 0 40 40" fill="none">
+        <ellipse cx="20" cy="14" rx="13" ry="8" fill={COLORS.card} stroke={stroke} strokeWidth="1.5" />
+        <path d="M20 24 L15 32 L20 32 L16 40" stroke={COLORS.clay} strokeWidth="2" fill="none" strokeLinecap="round" />
+      </svg>
+    );
+  }
+  return (
+    <svg width="40" height="40" viewBox="0 0 40 40" fill="none">
+      <ellipse cx="20" cy="20" rx="14" ry="9" fill={COLORS.card} stroke={stroke} strokeWidth="1.5" />
+    </svg>
+  );
+}
+
+function useLiveWeather(lat, lon) {
+  const [state, setState] = useState({ loading: true, error: null, data: null });
+  useEffect(() => {
+    let cancelled = false;
+    async function load() {
+      try {
+        const url = `https://api.open-meteo.com/v1/forecast?latitude=${lat}&longitude=${lon}&current=temperature_2m,weather_code,precipitation_probability&timezone=auto`;
+        const res = await fetch(url);
+        if (!res.ok) throw new Error("Weather request failed");
+        const json = await res.json();
+        if (!cancelled) {
+          setState({
+            loading: false, error: null,
+            data: {
+              temp: Math.round(json.current.temperature_2m),
+              code: json.current.weather_code,
+              rainChance: json.current.precipitation_probability,
+            },
+          });
+        }
+      } catch (err) {
+        if (!cancelled) setState({ loading: false, error: err.message, data: null });
+      }
+    }
+    load();
+    return () => { cancelled = true; };
+  }, [lat, lon]);
+  return state;
+}
+
+function TodaysWeatherCard() {
+  const { loading, error, data } = useLiveWeather(LAT, LON);
+  const month = new Date().getMonth();
+  const { season, crops } = PLANT_CALENDAR[month];
+  const weatherInfo = data ? (WEATHER_CODES[data.code] || { label: "Unsettled", icon: "cloud" }) : null;
+
+  return (
+    <div>
+      <div style={{
+        background: COLORS.card, borderRadius: 14, padding: "18px 20px",
+        display: "flex", alignItems: "center", justifyContent: "space-between",
+        border: `1px solid ${COLORS.line}`,
+      }}>
+        {loading && <div style={{ color: COLORS.inkSoft }}>Fetching today's weather…</div>}
+        {error && <div style={{ color: COLORS.clay }}>Couldn't load live weather. Showing seasonal guidance only.</div>}
+        {data && (
+          <React.Fragment>
+            <div>
+              <div style={{ fontSize: 34, fontFamily: "'Fraunces', Georgia, serif", lineHeight: 1 }}>{data.temp}°C</div>
+              <div style={{ fontSize: 14, color: COLORS.inkSoft, marginTop: 4 }}>
+                {weatherInfo.label} · {data.rainChance}% rain chance
+              </div>
+            </div>
+            <WeatherIcon kind={weatherInfo.icon} />
+          </React.Fragment>
+        )}
+      </div>
+
+      <div style={{ marginTop: 14, fontSize: 13, color: COLORS.inkSoft, display: "flex", alignItems: "center", gap: 8 }}>
+        <span style={{ width: 6, height: 6, borderRadius: "50%", background: COLORS.sage, display: "inline-block" }} />
+        {season} in the Eastern Cape
+      </div>
+
+      <div style={{ marginTop: 18 }}>
+        <h2 style={{ fontFamily: "'Fraunces', Georgia, serif", fontSize: 16, fontWeight: 600, margin: "0 0 10px" }}>
+          What thrives right now
+        </h2>
+        <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(140px, 1fr))", gap: 10 }}>
+          {crops.map((crop) => {
+            const details = findCropDetails(crop);
+            return (
+              <div key={crop} style={{
+                background: COLORS.card, border: `1px solid ${COLORS.line}`, borderRadius: 12,
+                padding: "10px 12px", display: "flex", flexDirection: "column", gap: 6,
+              }}>
+                <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                  <div style={{
+                    width: 30, height: 30, flexShrink: 0, borderRadius: 8, background: COLORS.bg,
+                    display: "flex", alignItems: "center", justifyContent: "center",
+                  }}>
+                    <CropIcon type={details ? details.icon : "leafy"} />
+                  </div>
+                  <span style={{ fontSize: 13.5, fontWeight: 600, lineHeight: 1.2 }}>{crop}</span>
+                </div>
+                {details ? (
+                  <React.Fragment>
+                    <div style={{ fontSize: 11.5, color: COLORS.inkSoft, lineHeight: 1.35 }}>
+                      Easiest: {details.easiestVariety}
+                    </div>
+                    <span style={{
+                      alignSelf: "flex-start", fontSize: 10.5, fontWeight: 600, color: COLORS.sage,
+                      background: "rgba(124,138,110,0.12)", padding: "2px 8px", borderRadius: 999,
+                    }}>
+                      {details.size}
+                    </span>
+                  </React.Fragment>
+                ) : (
+                  <div style={{ fontSize: 11.5, color: COLORS.inkSoft }}>No extra guidance yet</div>
+                )}
+              </div>
+            );
+          })}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+/* ===========================================================
+   Harvest watch — reads the live plant-index the Tracker writes
+=========================================================== */
+const HARVEST_GUIDE = [
+  { crop: "Tomatoes", keywords: ["tomato"], months: [11, 0, 1, 2], daysToMaturity: [70, 85], lookFor: "Fully coloured and slightly soft to a gentle squeeze — twist off rather than pull." },
+  { crop: "Peppers & chillies", keywords: ["pepper", "chilli", "chili", "capsicum"], months: [0, 1, 2, 3], daysToMaturity: [75, 90], lookFor: "Skin glossy and firm; colour deepens further the longer they hang." },
+  { crop: "Cucumbers", keywords: ["cucumber"], months: [10, 11, 0, 1, 2], daysToMaturity: [50, 70], lookFor: "Firm and deep green — pick before any yellowing starts." },
+  { crop: "Beans", keywords: ["bean"], months: [10, 11, 0, 1, 2], daysToMaturity: [55, 65], lookFor: "Pods snap crisply and seeds are barely visible through the skin." },
+  { crop: "Sweetcorn", keywords: ["corn", "maize"], months: [11, 0, 1, 2], daysToMaturity: [75, 90], lookFor: "Silks turn brown and dry; kernels release a milky liquid when pierced." },
+  { crop: "Squash & marrows", keywords: ["squash", "marrow", "zucchini", "courgette", "pumpkin"], months: [10, 11, 0, 1, 2, 3], daysToMaturity: [50, 60], lookFor: "Skin still tender for marrows; let storage squash harden fully first." },
+  { crop: "Basil", keywords: ["basil"], months: [10, 11, 0, 1, 2, 3], daysToMaturity: [60, 70], lookFor: "Pinch leaves before flower buds open for the best flavour." },
+  { crop: "Spinach & Swiss chard", keywords: ["spinach", "chard"], months: [2, 3, 4, 5, 6, 7, 8], daysToMaturity: [40, 50], lookFor: "Pick outer leaves once hand-sized so the centre keeps producing." },
+  { crop: "Beetroot", keywords: ["beetroot", "beet"], months: [3, 4, 5, 6, 7], daysToMaturity: [55, 65], lookFor: "Shoulders showing above the soil, roughly golf- to tennis-ball size." },
+  { crop: "Carrots", keywords: ["carrot"], months: [4, 5, 6, 7, 8], daysToMaturity: [70, 80], lookFor: "Shoulders visible at the soil surface with good colour and width." },
+  { crop: "Broccoli", keywords: ["broccoli"], months: [5, 6, 7, 8], daysToMaturity: [80, 100], lookFor: "Head tight and dark green — harvest before any yellow flowers show." },
+  { crop: "Cabbage", keywords: ["cabbage"], months: [5, 6, 7, 8], daysToMaturity: [70, 100], lookFor: "Head feels firm and dense when pressed." },
+  { crop: "Cauliflower", keywords: ["cauliflower"], months: [5, 6, 7], daysToMaturity: [80, 100], lookFor: "Curd compact and creamy-white, before it loosens or discolours." },
+  { crop: "Kale", keywords: ["kale"], months: [4, 5, 6, 7, 8], daysToMaturity: [55, 75], lookFor: "Leaves hand-sized and dark green; pick the lower leaves first." },
+  { crop: "Onion", keywords: ["onion"], months: [7, 8, 9], daysToMaturity: [100, 130], lookFor: "Necks soften and the tops flop over and start to dry off." },
+  { crop: "Garlic", keywords: ["garlic"], months: [9, 10], daysToMaturity: [150, 180], lookFor: "Lower leaves brown while a few upper leaves are still green." },
+  { crop: "Peas", keywords: ["pea"], months: [6, 7, 8], daysToMaturity: [60, 70], lookFor: "Pods feel full and firm; pick often to keep plants producing." },
+  { crop: "Broad beans", keywords: ["broad bean"], months: [6, 7, 8], daysToMaturity: [90, 100], lookFor: "Pods glossy and firm with beans showing as bumps, not yet leathery." },
+  { crop: "Turnips", keywords: ["turnip"], months: [4, 5, 6, 7], daysToMaturity: [45, 60], lookFor: "Roots at golf- to tennis-ball size — pull before they turn woody." },
+  { crop: "Leeks", keywords: ["leek"], months: [9, 10, 11], daysToMaturity: [120, 150], lookFor: "Stems reach finger to thumb thickness; can stay in the ground until needed." },
+];
+function findHarvestEntry(plantName) {
+  const name = plantName.toLowerCase();
+  return HARVEST_GUIDE.find((entry) => entry.keywords.some((k) => name.includes(k)));
+}
+function timingLabel(monthsUntil) {
+  if (monthsUntil === 0) return { text: "Harvesting now", color: "#5C8A4A" };
+  if (monthsUntil === 1) return { text: "Ready next month", color: "#7C8A6E" };
+  return { text: `Approaching in ${monthsUntil} months`, color: "#C08A34" };
+}
+function dayTimingLabel(daysUntilMin, daysUntilMax) {
+  if (daysUntilMin <= 0 && daysUntilMax >= 0) return { text: "Harvesting now", color: "#5C8A4A" };
+  if (daysUntilMin <= 7) return { text: `Ready in ${daysUntilMin} day${daysUntilMin === 1 ? "" : "s"}`, color: "#7C8A6E" };
+  if (daysUntilMin <= 60) return { text: `Ready in ~${Math.round(daysUntilMin / 7)} weeks`, color: "#C08A34" };
+  return { text: `Ready in ~${Math.round(daysUntilMin / 30)} months`, color: "#C08A34" };
+}
+function monthsUntilHarvest(harvestMonths, currentMonth) {
+  let best = 12;
+  for (const m of harvestMonths) {
+    const diff = (m - currentMonth + 12) % 12;
+    if (diff < best) best = diff;
+  }
+  return best;
+}
+const POLL_MS = 5000;
+
+function useGardenPlants(pollMs = POLL_MS, versionDep) {
+  const [plants, setPlants] = useState([]);
+  const [loading, setLoading] = useState(true);
+  useEffect(() => {
+    let cancelled = false;
+    async function refresh() {
+      const idx = await loadIndex();
+      const full = await Promise.all(idx.map((p) => loadPlant(p.id)));
+      if (!cancelled) { setPlants(full.filter(Boolean)); setLoading(false); }
+    }
+    refresh();
+    const interval = setInterval(refresh, pollMs);
+    return () => { cancelled = true; clearInterval(interval); };
+  }, [pollMs, versionDep]);
+  return { plants, loading };
+}
+
+function HarvestWatch({ maxItems = 20, plantIndexVersion }) {
+  const { plants: trackedPlants, loading } = useGardenPlants(POLL_MS, plantIndexVersion);
+
+  const upcoming = useMemo(() => {
+    const now = Date.now();
+    const currentMonth = new Date().getMonth();
+    return trackedPlants
+      .map((p) => {
+        const entry = findHarvestEntry(p.name);
+        if (!entry) return null;
+        if (p.plantedDate) {
+          const [minDays, maxDays] = entry.daysToMaturity;
+          const daysUntilMin = Math.ceil((p.plantedDate + minDays * 86400000 - now) / 86400000);
+          const daysUntilMax = Math.ceil((p.plantedDate + maxDays * 86400000 - now) / 86400000);
+          return {
+            plantId: p.id, plantName: p.name, lookFor: entry.lookFor,
+            sortKey: daysUntilMin, personalized: true, daysUntilMin, daysUntilMax,
+          };
+        }
+        return {
+          plantId: p.id, plantName: p.name, lookFor: entry.lookFor,
+          sortKey: monthsUntilHarvest(entry.months, currentMonth) * 30,
+          personalized: false, monthsUntil: monthsUntilHarvest(entry.months, currentMonth),
+        };
+      })
+      // Nearest to harvest first, furthest away last — no cutoff, so the
+      // whole tracked garden is represented in that order.
+      .filter((item) => item !== null)
+      .sort((a, b) => a.sortKey - b.sortKey || a.plantName.localeCompare(b.plantName))
+      .slice(0, maxItems);
+  }, [trackedPlants, maxItems]);
+
+  const unmatchedCount = trackedPlants.length - trackedPlants.filter((p) => findHarvestEntry(p.name)).length;
+
+  return (
+    <div style={{
+      background: COLORS.card, border: `1px solid ${COLORS.line}`, borderRadius: 14,
+      padding: "16px 16px 14px", maxWidth: 460,
+    }}>
+      <div style={{ display: "flex", alignItems: "baseline", justifyContent: "space-between", marginBottom: 12 }}>
+        <h2 style={{ fontFamily: "'Fraunces', Georgia, serif", fontSize: 17, fontWeight: 600, margin: 0 }}>Harvest watch</h2>
+        <span style={{ fontSize: 11.5, color: COLORS.inkSoft }}>Your garden</span>
+      </div>
+
+      {loading && <div style={{ fontSize: 13, color: COLORS.inkSoft }}>Checking your garden…</div>}
+      {!loading && trackedPlants.length === 0 && (
+        <div style={{ fontSize: 13, color: COLORS.inkSoft }}>Add plant groups in the Tracker tab to see their harvest timing here.</div>
+      )}
+      {!loading && trackedPlants.length > 0 && upcoming.length === 0 && (
+        <div style={{ fontSize: 13, color: COLORS.inkSoft }}>None of your tracked plants have harvest data yet.</div>
+      )}
+
+      <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
+        {upcoming.map((item) => {
+          const timing = item.personalized
+            ? dayTimingLabel(item.daysUntilMin, item.daysUntilMax)
+            : timingLabel(item.monthsUntil);
+          return (
+            <div key={item.plantId} style={{ background: "#fff", border: `1px solid ${COLORS.line}`, borderRadius: 10, padding: "10px 12px" }}>
+              <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 8 }}>
+                <span style={{ fontSize: 14, fontWeight: 600 }}>{item.plantName}</span>
+                <span style={{ fontSize: 11, fontWeight: 600, color: "#fff", background: timing.color, padding: "3px 9px", borderRadius: 999, whiteSpace: "nowrap" }}>
+                  {timing.text}
+                </span>
+              </div>
+              <div style={{ fontSize: 12.5, color: COLORS.inkSoft, marginTop: 5, lineHeight: 1.4 }}>{item.lookFor}</div>
+              {!item.personalized && (
+                <div style={{ fontSize: 11, color: COLORS.inkSoft, marginTop: 4, fontStyle: "italic" }}>
+                  Add a planting date in Tracker for a precise estimate.
+                </div>
+              )}
+            </div>
+          );
+        })}
+      </div>
+
+      {!loading && unmatchedCount > 0 && (
+        <div style={{ fontSize: 11.5, color: COLORS.inkSoft, marginTop: 10 }}>
+          {unmatchedCount} tracked plant{unmatchedCount > 1 ? "s" : ""} without harvest data yet.
+        </div>
+      )}
+    </div>
+  );
+}
+
+/* ===========================================================
+   Watering reminders — homepage glance at what's due for water
+=========================================================== */
+const WATER_REMINDER_DAYS = 3;
+
+function WateringReminders({ plantIndexVersion }) {
+  const { plants, loading } = useGardenPlants(POLL_MS, plantIndexVersion);
+  const [busyId, setBusyId] = useState(null);
+
+  const needsWater = useMemo(() => {
+    const now = Date.now();
+    return plants
+      .map((p) => {
+        const daysSince = p.lastWatered ? Math.floor((now - p.lastWatered) / 86400000) : null;
+        return { ...p, daysSince };
+      })
+      .filter((p) => p.daysSince === null || p.daysSince >= WATER_REMINDER_DAYS)
+      .sort((a, b) => (b.daysSince ?? 999) - (a.daysSince ?? 999));
+  }, [plants]);
+
+  async function handleQuickWater(plant) {
+    setBusyId(plant.id);
+    await savePlant({ ...plant, lastWatered: Date.now() });
+    setBusyId(null);
+  }
+
+  if (loading || needsWater.length === 0) return null;
+
+  return (
+    <div style={{
+      background: COLORS.card, border: `1px solid ${COLORS.line}`, borderRadius: 14,
+      padding: "14px 16px", maxWidth: 460, marginBottom: 18,
+    }}>
+      <h2 style={{ fontFamily: "'Fraunces', Georgia, serif", fontSize: 15, fontWeight: 600, margin: "0 0 10px", color: COLORS.clay }}>
+        Needs watering
+      </h2>
+      <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+        {needsWater.map((p) => (
+          <div key={p.id} style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 8 }}>
+            <span style={{ fontSize: 13.5 }}>
+              {p.name} <span style={{ color: COLORS.inkSoft, fontSize: 12 }}>
+                — {p.daysSince === null ? "never logged" : `${p.daysSince}d ago`}
+              </span>
+            </span>
+            <button onClick={() => handleQuickWater(p)} disabled={busyId === p.id} style={btnGhostLocal}>
+              {busyId === p.id ? "…" : "Log watering"}
+            </button>
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+const btnGhostLocal = { background: "transparent", border: "1px solid #5B6350", color: "#5B6350", borderRadius: 999, padding: "4px 10px", fontSize: 12, cursor: "pointer", whiteSpace: "nowrap" };
+
+/* ===========================================================
+   Home screen — combines weather/planting + harvest watch
+=========================================================== */
+function HomeScreen({ plantIndexVersion }) {
+  return (
+    <div style={{ padding: "20px 18px 90px" }}>
+      <div style={{ marginBottom: 18 }}>
+        <div style={{ fontSize: 13, color: COLORS.inkSoft }}>{todayLabel()}</div>
+        <h1 style={{ fontFamily: "'Fraunces', Georgia, serif", fontSize: 24, margin: "4px 0 0", fontWeight: 600 }}>
+          Gqeberha garden
+        </h1>
+      </div>
+      <div style={{ marginBottom: 18 }}>
+        <WateringReminders plantIndexVersion={plantIndexVersion} />
+      </div>
+      <TodaysWeatherCard />
+      <div style={{ marginTop: 22 }}>
+        <HarvestWatch plantIndexVersion={plantIndexVersion} />
+      </div>
+    </div>
+  );
+}
+
+/* ===========================================================
+   Tracker screen — full GrowthTracker feature
+=========================================================== */
+const inputStyle = { width: "100%", padding: "9px 12px", borderRadius: 8, border: `1px solid ${COLORS.line}`, fontSize: 13.5, fontFamily: "inherit", boxSizing: "border-box" };
+const labelStyle = { fontSize: 13, color: COLORS.inkSoft, marginBottom: 6, display: "block" };
+const btnPrimary = { background: COLORS.sage, color: "#fff", border: "none", borderRadius: 8, padding: "8px 16px", fontSize: 13.5, cursor: "pointer" };
+const btnGhost = { background: "transparent", border: `1px solid ${COLORS.inkSoft}`, color: COLORS.inkSoft, borderRadius: 999, padding: "5px 12px", fontSize: 12.5, cursor: "pointer" };
+
+function Section({ title, children }) {
+  return (
+    <div style={{ background: COLORS.card, border: `1px solid ${COLORS.line}`, borderRadius: 14, padding: "16px 16px", marginBottom: 16 }}>
+      <h2 style={{ fontFamily: "'Fraunces', Georgia, serif", fontSize: 16, fontWeight: 600, margin: "0 0 12px" }}>{title}</h2>
+      {children}
+    </div>
+  );
+}
+
+function TrackerScreen({ onPlantsChanged }) {
+  const [index, setIndex] = useState([]);
+  const [activeId, setActiveId] = useState(null);
+  const [plant, setPlant] = useState(null);
+  const [loading, setLoading] = useState(true);
+  const [addingPlant, setAddingPlant] = useState(false);
+  const [newPlantName, setNewPlantName] = useState("");
+  const [addPlantError, setAddPlantError] = useState(null);
+
+  const [checkHealth, setCheckHealth] = useState("healthy");
+  const [checkWatered, setCheckWatered] = useState(false);
+  const [checkPestNote, setCheckPestNote] = useState("");
+  const [checkNote, setCheckNote] = useState("");
+
+  const [addingPest, setAddingPest] = useState(false);
+  const [pestObs, setPestObs] = useState("");
+  const [pestTreatment, setPestTreatment] = useState("");
+
+  const [notesDraft, setNotesDraft] = useState("");
+  const [notesSaved, setNotesSaved] = useState(true);
+
+  const [addingVariety, setAddingVariety] = useState(false);
+  const [varietyName, setVarietyName] = useState("");
+  const [varietyImage, setVarietyImage] = useState(null);
+  const [varietyImageUrl, setVarietyImageUrl] = useState("");
+  const [varietyBusy, setVarietyBusy] = useState(false);
+
+  const [activeIndividual, setActiveIndividual] = useState(null); // { varietyId, individualId }
+  const [individualNoteDraft, setIndividualNoteDraft] = useState("");
+  const [individualHealthDraft, setIndividualHealthDraft] = useState("healthy");
+
+  const [renaming, setRenaming] = useState(false);
+  const [renameDraft, setRenameDraft] = useState("");
+  const [confirmingDelete, setConfirmingDelete] = useState(false);
+
+  useEffect(() => {
+    (async () => {
+      const idx = await loadIndex();
+      setIndex(idx);
+      if (idx.length) setActiveId(idx[0].id);
+      setLoading(false);
+    })();
+  }, []);
+
+  useEffect(() => {
+    if (!activeId) { setPlant(null); return; }
+    (async () => {
+      const p = await loadPlant(activeId);
+      const withDefaults = p ? {
+        ...p,
+        varieties: (p.varieties || []).map((v) => ({
+          ...v,
+          individuals: v.individuals || [],
+          nextIndividualIndex: v.nextIndividualIndex ?? (v.individuals ? v.individuals.length : 0),
+        })),
+      } : null;
+      setPlant(withDefaults);
+      setCheckHealth(p ? p.health : "healthy");
+      setNotesDraft(p ? p.notes : "");
+      setNotesSaved(true);
+      setAddingVariety(false);
+      setVarietyName(""); setVarietyImage(null); setVarietyImageUrl("");
+      setActiveIndividual(null); setIndividualNoteDraft(""); setIndividualHealthDraft("healthy");
+      setRenaming(false); setConfirmingDelete(false);
+    })();
+  }, [activeId]);
+
+  const refreshPlant = useCallback(async (updated) => {
+    setPlant(updated);
+    await savePlant(updated);
+  }, []);
+
+  async function handleAddPlant() {
+    const name = newPlantName.trim();
+    if (!name) return;
+    setAddPlantError(null);
+    try {
+      const p = newPlant(name);
+      await savePlant(p);
+      const newIndex = [...index, { id: p.id, name: p.name }];
+      setIndex(newIndex);
+      await saveIndex(newIndex);
+      setNewPlantName(""); setAddingPlant(false); setActiveId(p.id);
+      onPlantsChanged();
+    } catch (err) {
+      setAddPlantError("Couldn't save that plant — " + (err && err.message ? err.message : "storage error") + ". Try again, or free up space if storage is full.");
+    }
+  }
+
+  async function handleDeletePlant(id) {
+    const newIndex = index.filter((p) => p.id !== id);
+    setIndex(newIndex);
+    await saveIndex(newIndex);
+    if (activeId === id) setActiveId(newIndex.length ? newIndex[0].id : null);
+    setConfirmingDelete(false);
+    onPlantsChanged();
+  }
+
+  async function handleLogWaterToday() {
+    if (!plant) return;
+    await refreshPlant({ ...plant, lastWatered: Date.now() });
+  }
+
+  async function handleSetPlantedDate(dateStr) {
+    if (!plant) return;
+    const ts = dateStr ? new Date(dateStr + "T00:00:00").getTime() : null;
+    const updated = { ...plant, plantedDate: ts };
+    await refreshPlant(updated);
+    if (ts) await recordSeasonPlanting(updated);
+    onPlantsChanged();
+  }
+
+  async function handleRenamePlant() {
+    const name = renameDraft.trim();
+    if (!plant || !name) return;
+    await refreshPlant({ ...plant, name });
+    const newIndex = index.map((p) => (p.id === plant.id ? { ...p, name } : p));
+    setIndex(newIndex);
+    await saveIndex(newIndex);
+    await renameSeasonHistoryEntry(plant.id, name);
+    await renameHarvestPlantName(plant.id, name);
+    setRenaming(false);
+    onPlantsChanged();
+  }
+
+  async function handleAddPest() {
+    if (!plant || !pestObs.trim()) return;
+    const entry = { id: uid(), observation: pestObs.trim(), treatment: pestTreatment.trim(), dateAdded: Date.now() };
+    await refreshPlant({ ...plant, pests: [...plant.pests, entry] });
+    setPestObs(""); setPestTreatment(""); setAddingPest(false);
+  }
+
+  async function handleResolvePest(id) {
+    if (!plant) return;
+    await refreshPlant({ ...plant, pests: plant.pests.filter((p) => p.id !== id) });
+  }
+
+  async function handleSaveCheckIn() {
+    if (!plant) return;
+    const entry = { id: uid(), date: Date.now(), health: checkHealth, watered: checkWatered, pestNote: checkPestNote.trim(), note: checkNote.trim() };
+    await refreshPlant({
+      ...plant, health: checkHealth,
+      lastWatered: checkWatered ? Date.now() : plant.lastWatered,
+      logs: [entry, ...plant.logs],
+    });
+    setCheckWatered(false); setCheckPestNote(""); setCheckNote("");
+  }
+
+  async function handleSaveNotes() {
+    if (!plant) return;
+    await refreshPlant({ ...plant, notes: notesDraft });
+    setNotesSaved(true);
+  }
+
+  async function handleVarietyFileChange(e) {
+    const file = e.target.files && e.target.files[0];
+    if (!file) return;
+    setVarietyBusy(true);
+    try {
+      const compressed = await compressImage(file);
+      setVarietyImage(compressed); setVarietyImageUrl("");
+    } catch {}
+    setVarietyBusy(false);
+  }
+
+  async function handleAddVariety() {
+    if (!plant || !varietyName.trim()) return;
+    const entry = { id: uid(), name: varietyName.trim(), image: varietyImage || varietyImageUrl.trim() || null };
+    await refreshPlant({ ...plant, varieties: [...(plant.varieties || []), entry] });
+    setVarietyName(""); setVarietyImage(null); setVarietyImageUrl(""); setAddingVariety(false);
+  }
+
+  async function handleDeleteVariety(id) {
+    if (!plant) return;
+    await refreshPlant({ ...plant, varieties: (plant.varieties || []).filter((v) => v.id !== id) });
+    if (activeIndividual && activeIndividual.varietyId === id) setActiveIndividual(null);
+  }
+
+  // Individual plants within a variety group — each gets its own letter
+  // (A, B, C…) and its own note/observation history, so an issue can be
+  // traced back to the specific plant it started on rather than the group.
+  async function handleAddIndividual(varietyId) {
+    if (!plant) return;
+    const varieties = plant.varieties.map((v) => {
+      if (v.id !== varietyId) return v;
+      const nextIndex = v.nextIndividualIndex || 0;
+      const individual = { id: uid(), letter: indexToLetter(nextIndex), health: "healthy", notes: [] };
+      return { ...v, individuals: [...(v.individuals || []), individual], nextIndividualIndex: nextIndex + 1 };
+    });
+    await refreshPlant({ ...plant, varieties });
+  }
+
+  async function handleDeleteIndividual(varietyId, individualId) {
+    if (!plant) return;
+    const varieties = plant.varieties.map((v) =>
+      v.id !== varietyId ? v : { ...v, individuals: (v.individuals || []).filter((i) => i.id !== individualId) }
+    );
+    await refreshPlant({ ...plant, varieties });
+    if (activeIndividual && activeIndividual.individualId === individualId) setActiveIndividual(null);
+  }
+
+  async function handleAddIndividualNote() {
+    if (!plant || !activeIndividual) return;
+    const { varietyId, individualId } = activeIndividual;
+    const text = individualNoteDraft.trim();
+    if (!text) return;
+    const entry = { id: uid(), date: Date.now(), text, health: individualHealthDraft };
+    const varieties = plant.varieties.map((v) => {
+      if (v.id !== varietyId) return v;
+      const individuals = (v.individuals || []).map((i) =>
+        i.id !== individualId ? i : { ...i, health: individualHealthDraft, notes: [entry, ...i.notes] }
+      );
+      return { ...v, individuals };
+    });
+    await refreshPlant({ ...plant, varieties });
+    setIndividualNoteDraft("");
+  }
+
+  const daysAgo = (ts) => {
+    if (!ts) return "Not logged";
+    const days = Math.floor((Date.now() - ts) / 86400000);
+    if (days <= 0) return "Today";
+    if (days === 1) return "Yesterday";
+    return `${days} days ago`;
+  };
+
+  return (
+    <div style={{ padding: "20px 18px 90px" }}>
+      <div style={{ marginBottom: 16 }}>
+        <div style={{ fontSize: 13, color: COLORS.inkSoft }}>{todayLabel()}</div>
+        <h1 style={{ fontFamily: "'Fraunces', Georgia, serif", fontSize: 24, margin: "4px 0 0", fontWeight: 600 }}>Growth tracker</h1>
+      </div>
+
+      <div style={{ display: "flex", flexWrap: "wrap", gap: 8, marginBottom: 18 }}>
+        {index.map((p) => (
+          <button key={p.id} onClick={() => setActiveId(p.id)} style={{
+            border: `1px solid ${p.id === activeId ? COLORS.sage : COLORS.line}`,
+            background: p.id === activeId ? COLORS.sage : COLORS.card,
+            color: p.id === activeId ? "#fff" : COLORS.ink,
+            borderRadius: 999, padding: "7px 14px", fontSize: 13.5, cursor: "pointer",
+          }}>
+            {p.name}
+          </button>
+        ))}
+        {!addingPlant && (
+          <button onClick={() => setAddingPlant(true)} style={{ border: `1px dashed ${COLORS.inkSoft}`, background: "transparent", color: COLORS.inkSoft, borderRadius: 999, padding: "7px 14px", fontSize: 13.5, cursor: "pointer" }}>
+            + Add plant group
+          </button>
+        )}
+      </div>
+
+      {addingPlant && (
+        <div style={{ display: "flex", flexDirection: "column", gap: 6, marginBottom: 18 }}>
+          <div style={{ display: "flex", gap: 8 }}>
+            <input autoFocus value={newPlantName} onChange={(e) => setNewPlantName(e.target.value)}
+              onKeyDown={(e) => e.key === "Enter" && handleAddPlant()}
+              placeholder="e.g. Tomatoes — Bed 1" style={inputStyle} />
+            <button onClick={handleAddPlant} style={btnPrimary}>Add</button>
+          </div>
+          {addPlantError && <div style={{ fontSize: 12.5, color: COLORS.danger }}>{addPlantError}</div>}
+        </div>
+      )}
+
+      {loading && <div style={{ color: COLORS.inkSoft }}>Loading your garden…</div>}
+      {!loading && !index.length && !addingPlant && (
+        <div style={{ color: COLORS.inkSoft, fontSize: 14 }}>No plant groups yet — add one above to start tracking.</div>
+      )}
+
+      {plant && (
+        <React.Fragment>
+          <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 14 }}>
+            {renaming ? (
+              <div style={{ display: "flex", gap: 8, flex: 1 }}>
+                <input
+                  autoFocus
+                  value={renameDraft}
+                  onChange={(e) => setRenameDraft(e.target.value)}
+                  onKeyDown={(e) => e.key === "Enter" && handleRenamePlant()}
+                  style={inputStyle}
+                />
+                <button onClick={handleRenamePlant} style={btnPrimary}>Save</button>
+                <button onClick={() => setRenaming(false)} style={btnGhost}>Cancel</button>
+              </div>
+            ) : (
+              <React.Fragment>
+                <h2 style={{ fontFamily: "'Fraunces', Georgia, serif", fontSize: 19, fontWeight: 600, margin: 0 }}>{plant.name}</h2>
+                <button onClick={() => { setRenaming(true); setRenameDraft(plant.name); }} style={btnGhost}>Rename</button>
+              </React.Fragment>
+            )}
+          </div>
+
+          <Section title="Current status">
+            <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 12 }}>
+              <span style={{ fontSize: 14, color: COLORS.inkSoft }}>Planted on</span>
+              <input
+                type="date"
+                value={plant.plantedDate ? new Date(plant.plantedDate).toISOString().slice(0, 10) : ""}
+                onChange={(e) => handleSetPlantedDate(e.target.value)}
+                style={{ ...inputStyle, width: "auto", padding: "6px 10px", fontSize: 13 }}
+              />
+            </div>
+            <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 12 }}>
+              <span style={{ fontSize: 14, color: COLORS.inkSoft }}>Health</span>
+              <span style={{ fontSize: 13, fontWeight: 600, color: "#fff", background: healthMeta(plant.health).color, padding: "4px 12px", borderRadius: 999 }}>
+                {healthMeta(plant.health).label}
+              </span>
+            </div>
+            <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 12 }}>
+              <span style={{ fontSize: 14, color: COLORS.inkSoft }}>Last watered</span>
+              <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+                <span style={{ fontSize: 13.5 }}>{daysAgo(plant.lastWatered)}</span>
+                <button onClick={handleLogWaterToday} style={btnGhost}>Log watering</button>
+              </div>
+            </div>
+
+            <div style={{ marginTop: 4 }}>
+              <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between" }}>
+                <span style={{ fontSize: 14, color: COLORS.inkSoft }}>Active pest issues</span>
+                {!addingPest && <button onClick={() => setAddingPest(true)} style={btnGhost}>+ Report</button>}
+              </div>
+              {plant.pests.length === 0 && !addingPest && (
+                <div style={{ fontSize: 13, color: COLORS.inkSoft, marginTop: 6 }}>None observed</div>
+              )}
+              {plant.pests.map((p) => (
+                <div key={p.id} style={{ marginTop: 8, background: "#fff", border: `1px solid ${COLORS.line}`, borderRadius: 10, padding: "10px 12px" }}>
+                  <div style={{ fontSize: 13.5 }}>{p.observation}</div>
+                  {p.treatment && <div style={{ fontSize: 12.5, color: COLORS.inkSoft, marginTop: 3 }}>Treatment: {p.treatment}</div>}
+                  <button onClick={() => handleResolvePest(p.id)} style={{ ...btnGhost, marginTop: 8 }}>Mark resolved</button>
+                </div>
+              ))}
+              {addingPest && (
+                <div style={{ marginTop: 10, display: "flex", flexDirection: "column", gap: 8 }}>
+                  <input placeholder="What did you observe?" value={pestObs} onChange={(e) => setPestObs(e.target.value)} style={inputStyle} />
+                  <input placeholder="Treatment applied (optional)" value={pestTreatment} onChange={(e) => setPestTreatment(e.target.value)} style={inputStyle} />
+                  <div style={{ display: "flex", gap: 8 }}>
+                    <button onClick={handleAddPest} style={btnPrimary}>Save</button>
+                    <button onClick={() => setAddingPest(false)} style={btnGhost}>Cancel</button>
+                  </div>
+                </div>
+              )}
+            </div>
+          </Section>
+
+          <Section title="Varieties">
+            {(!plant.varieties || plant.varieties.length === 0) && !addingVariety && (
+              <div style={{ fontSize: 13, color: COLORS.inkSoft, marginBottom: 10 }}>
+                No varieties logged yet — e.g. "Roma" or "Black Krim" for tomatoes.
+              </div>
+            )}
+            {plant.varieties && plant.varieties.length > 0 && (
+              <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(110px, 1fr))", gap: 10, marginBottom: addingVariety ? 14 : 0 }}>
+                {plant.varieties.map((v) => (
+                  <div key={v.id} style={{ background: "#fff", border: `1px solid ${COLORS.line}`, borderRadius: 10, overflow: "hidden" }}>
+                    <div style={{ width: "100%", aspectRatio: "1 / 1", background: COLORS.bg, display: "flex", alignItems: "center", justifyContent: "center" }}>
+                      {v.image ? (
+                        <img src={v.image} alt={v.name} style={{ width: "100%", height: "100%", objectFit: "cover" }} />
+                      ) : (
+                        <span style={{ fontSize: 11, color: COLORS.inkSoft }}>No image</span>
+                      )}
+                    </div>
+                    <div style={{ padding: "7px 8px", display: "flex", alignItems: "center", justifyContent: "space-between", gap: 6 }}>
+                      <span style={{ fontSize: 12.5 }}>{v.name}</span>
+                      <button onClick={() => handleDeleteVariety(v.id)} style={{ background: "none", border: "none", color: COLORS.inkSoft, cursor: "pointer", fontSize: 14, lineHeight: 1 }}>×</button>
+                    </div>
+                    <div style={{ padding: "0 8px 8px", display: "flex", flexWrap: "wrap", gap: 5 }}>
+                      {(v.individuals || []).map((ind) => (
+                        <button key={ind.id} onClick={() => { setActiveIndividual({ varietyId: v.id, individualId: ind.id }); setIndividualNoteDraft(""); setIndividualHealthDraft(ind.health || "healthy"); }} style={{
+                          width: 24, height: 24, borderRadius: "50%", fontSize: 11.5, fontWeight: 700, cursor: "pointer",
+                          border: `1.5px solid ${activeIndividual && activeIndividual.individualId === ind.id ? COLORS.sage : healthMeta(ind.health).color}`,
+                          background: activeIndividual && activeIndividual.individualId === ind.id ? COLORS.sage : "#fff",
+                          color: activeIndividual && activeIndividual.individualId === ind.id ? "#fff" : COLORS.ink,
+                        }} title={`Plant ${ind.letter}`}>
+                          {ind.letter}
+                        </button>
+                      ))}
+                      <button onClick={() => handleAddIndividual(v.id)} title="Track a new individual plant" style={{
+                        width: 24, height: 24, borderRadius: "50%", fontSize: 13, cursor: "pointer",
+                        border: `1.5px dashed ${COLORS.inkSoft}`, background: "transparent", color: COLORS.inkSoft, lineHeight: 1,
+                      }}>+</button>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            )}
+            {!addingVariety && <button onClick={() => setAddingVariety(true)} style={btnGhost}>+ Add variety</button>}
+            {addingVariety && (
+              <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+                <input placeholder="Variety name (e.g. Roma)" value={varietyName} onChange={(e) => setVarietyName(e.target.value)} style={inputStyle} />
+                <label style={{ ...labelStyle, marginBottom: 0 }}>Photo</label>
+                <input type="file" accept="image/*" onChange={handleVarietyFileChange} style={{ fontSize: 12.5 }} />
+                {varietyBusy && <div style={{ fontSize: 12, color: COLORS.inkSoft }}>Compressing photo…</div>}
+                <div style={{ fontSize: 12, color: COLORS.inkSoft }}>or paste an image URL</div>
+                <input placeholder="https://…" value={varietyImageUrl} onChange={(e) => { setVarietyImageUrl(e.target.value); setVarietyImage(null); }} style={inputStyle} />
+                {(varietyImage || varietyImageUrl) && (
+                  <img src={varietyImage || varietyImageUrl} alt="Preview" style={{ width: 72, height: 72, objectFit: "cover", borderRadius: 8, border: `1px solid ${COLORS.line}` }} />
+                )}
+                <div style={{ display: "flex", gap: 8 }}>
+                  <button onClick={handleAddVariety} style={btnPrimary}>Save variety</button>
+                  <button onClick={() => { setAddingVariety(false); setVarietyName(""); setVarietyImage(null); setVarietyImageUrl(""); }} style={btnGhost}>Cancel</button>
+                </div>
+              </div>
+            )}
+
+            {activeIndividual && (() => {
+              const variety = plant.varieties.find((v) => v.id === activeIndividual.varietyId);
+              const individual = variety && (variety.individuals || []).find((i) => i.id === activeIndividual.individualId);
+              if (!variety || !individual) return null;
+              return (
+                <div style={{ marginTop: 16, paddingTop: 14, borderTop: `1px solid ${COLORS.line}` }}>
+                  <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 10 }}>
+                    <h3 style={{ fontFamily: "'Fraunces', Georgia, serif", fontSize: 14.5, fontWeight: 600, margin: 0 }}>
+                      {variety.name} · Plant {individual.letter}
+                    </h3>
+                    <button onClick={() => setActiveIndividual(null)} style={btnGhost}>Close</button>
+                  </div>
+
+                  <label style={labelStyle}>Health</label>
+                  <div style={{ display: "flex", gap: 6, marginBottom: 12, flexWrap: "wrap" }}>
+                    {HEALTH_LEVELS.map((h) => (
+                      <button key={h.key} onClick={() => setIndividualHealthDraft(h.key)} style={{
+                        border: `1px solid ${individualHealthDraft === h.key ? h.color : COLORS.line}`,
+                        background: individualHealthDraft === h.key ? h.color : "#fff",
+                        color: individualHealthDraft === h.key ? "#fff" : COLORS.ink,
+                        borderRadius: 999, padding: "5px 11px", fontSize: 12.5, cursor: "pointer",
+                      }}>
+                        {h.label}
+                      </button>
+                    ))}
+                  </div>
+                  <textarea
+                    placeholder={`Observation for Plant ${individual.letter} — e.g. yellowing on lower leaves, first flowers, pest spotted…`}
+                    value={individualNoteDraft} onChange={(e) => setIndividualNoteDraft(e.target.value)}
+                    rows={2} style={{ ...inputStyle, resize: "vertical" }}
+                  />
+                  <div style={{ display: "flex", gap: 8, marginTop: 8, marginBottom: 14 }}>
+                    <button onClick={handleAddIndividualNote} style={btnPrimary}>Save observation</button>
+                    <button onClick={() => handleDeleteIndividual(variety.id, individual.id)} style={{ ...btnGhost, color: COLORS.danger, borderColor: COLORS.danger }}>
+                      Remove Plant {individual.letter}
+                    </button>
+                  </div>
+
+                  {individual.notes.length === 0 ? (
+                    <div style={{ fontSize: 12.5, color: COLORS.inkSoft }}>No observations logged for this plant yet.</div>
+                  ) : (
+                    <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+                      {individual.notes.map((n) => (
+                        <div key={n.id} style={{ background: "#fff", border: `1px solid ${COLORS.line}`, borderRadius: 10, padding: "9px 11px" }}>
+                          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+                            <span style={{ fontSize: 11.5, color: COLORS.inkSoft }}>
+                              {new Date(n.date).toLocaleDateString("en-ZA", { day: "numeric", month: "short" })}
+                            </span>
+                            <span style={{ fontSize: 11, fontWeight: 600, color: "#fff", background: healthMeta(n.health).color, padding: "2px 8px", borderRadius: 999 }}>
+                              {healthMeta(n.health).label}
+                            </span>
+                          </div>
+                          <div style={{ fontSize: 13, marginTop: 5, color: COLORS.ink }}>{n.text}</div>
+                        </div>
+                      ))}
+                    </div>
+                  )}
+                </div>
+              );
+            })()}
+          </Section>
+
+          <Section title="Add a check-in">
+            <label style={labelStyle}>Health today</label>
+            <div style={{ display: "flex", gap: 6, marginBottom: 12, flexWrap: "wrap" }}>
+              {HEALTH_LEVELS.map((h) => (
+                <button key={h.key} onClick={() => setCheckHealth(h.key)} style={{
+                  border: `1px solid ${checkHealth === h.key ? h.color : COLORS.line}`,
+                  background: checkHealth === h.key ? h.color : "#fff",
+                  color: checkHealth === h.key ? "#fff" : COLORS.ink,
+                  borderRadius: 999, padding: "6px 12px", fontSize: 13, cursor: "pointer",
+                }}>
+                  {h.label}
+                </button>
+              ))}
+            </div>
+            <label style={{ ...labelStyle, display: "flex", alignItems: "center", gap: 8, cursor: "pointer" }}>
+              <input type="checkbox" checked={checkWatered} onChange={(e) => setCheckWatered(e.target.checked)} />
+              Watered today
+            </label>
+            <input placeholder="Insects/pests observed (optional)" value={checkPestNote} onChange={(e) => setCheckPestNote(e.target.value)} style={{ ...inputStyle, marginTop: 10 }} />
+            <textarea placeholder="Any other notes for this check-in (optional)" value={checkNote} onChange={(e) => setCheckNote(e.target.value)} rows={2} style={{ ...inputStyle, marginTop: 10, resize: "vertical" }} />
+            <button onClick={handleSaveCheckIn} style={{ ...btnPrimary, marginTop: 10 }}>Save check-in</button>
+          </Section>
+
+          <Section title="History">
+            {plant.logs.length === 0 && <div style={{ fontSize: 13, color: COLORS.inkSoft }}>No check-ins logged yet.</div>}
+            <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
+              {plant.logs.map((entry) => (
+                <div key={entry.id} style={{ background: "#fff", border: `1px solid ${COLORS.line}`, borderRadius: 10, padding: "10px 12px" }}>
+                  <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+                    <span style={{ fontSize: 12.5, color: COLORS.inkSoft }}>
+                      {new Date(entry.date).toLocaleDateString("en-ZA", { day: "numeric", month: "short" })}
+                    </span>
+                    <span style={{ fontSize: 11.5, fontWeight: 600, color: "#fff", background: healthMeta(entry.health).color, padding: "2px 9px", borderRadius: 999 }}>
+                      {healthMeta(entry.health).label}
+                    </span>
+                  </div>
+                  <div style={{ fontSize: 13, marginTop: 6, color: COLORS.ink }}>
+                    {entry.watered ? "Watered" : "Not watered"}
+                    {entry.pestNote && ` · Pests: ${entry.pestNote}`}
+                  </div>
+                  {entry.note && <div style={{ fontSize: 12.5, color: COLORS.inkSoft, marginTop: 4 }}>{entry.note}</div>}
+                </div>
+              ))}
+            </div>
+          </Section>
+
+          <Section title="Notes">
+            <textarea value={notesDraft} onChange={(e) => { setNotesDraft(e.target.value); setNotesSaved(false); }}
+              placeholder="General notes for this plant group — varieties, placement, reminders…" rows={4} style={{ ...inputStyle, resize: "vertical" }} />
+            <div style={{ display: "flex", alignItems: "center", gap: 10, marginTop: 8 }}>
+              <button onClick={handleSaveNotes} style={btnPrimary} disabled={notesSaved}>Save notes</button>
+              <span style={{ fontSize: 12.5, color: COLORS.inkSoft }}>{notesSaved ? "Saved" : "Unsaved changes"}</span>
+            </div>
+          </Section>
+
+          {confirmingDelete ? (
+            <div style={{ display: "flex", alignItems: "center", gap: 10, marginTop: 4 }}>
+              <span style={{ fontSize: 12.5, color: COLORS.danger }}>Delete "{plant.name}" and all its history?</span>
+              <button onClick={() => handleDeletePlant(plant.id)} style={{ ...btnGhost, color: "#fff", background: COLORS.danger, borderColor: COLORS.danger }}>
+                Yes, delete
+              </button>
+              <button onClick={() => setConfirmingDelete(false)} style={btnGhost}>Cancel</button>
+            </div>
+          ) : (
+            <button onClick={() => setConfirmingDelete(true)} style={{ ...btnGhost, color: COLORS.danger, borderColor: COLORS.danger, marginTop: 4 }}>
+              Remove this plant group
+            </button>
+          )}
+        </React.Fragment>
+      )}
+
+      {!loading && index.length > 0 && (
+        <div style={{ marginTop: 24, paddingTop: 14, borderTop: `1px solid ${COLORS.line}` }}>
+          <button onClick={exportGardenData} style={btnGhost}>Export garden data (JSON)</button>
+        </div>
+      )}
+    </div>
+  );
+}
+
+/* ===========================================================
+   Seasons screen — top selector tab (Summer → Autumn → Winter →
+   Spring, the order they're experienced in the year), showing
+   which crops have previously been planted in each season as a
+   guideline of what has worked before.
+=========================================================== */
+function SeasonsScreen({ plantIndexVersion }) {
+  const [selected, setSelected] = useState(currentSeason());
+  const [history, setHistory] = useState([]);
+  const [loading, setLoading] = useState(true);
+
+  useEffect(() => {
+    let cancelled = false;
+    async function refresh() {
+      const h = await loadSeasonHistory();
+      if (!cancelled) { setHistory(h); setLoading(false); }
+    }
+    refresh();
+    const interval = setInterval(refresh, POLL_MS);
+    return () => { cancelled = true; clearInterval(interval); };
+  }, [plantIndexVersion]);
+
+  const cropsForSeason = useMemo(() => {
+    const map = new Map();
+    history
+      .filter((h) => h.season === selected)
+      .forEach((h) => {
+        const key = h.cropName.trim().toLowerCase();
+        const existing = map.get(key);
+        if (existing) {
+          existing.count += 1;
+          if (h.plantedDate > existing.lastPlanted) existing.lastPlanted = h.plantedDate;
+        } else {
+          map.set(key, { cropName: h.cropName, count: 1, lastPlanted: h.plantedDate });
+        }
+      });
+    return Array.from(map.values()).sort((a, b) => b.lastPlanted - a.lastPlanted);
+  }, [history, selected]);
+
+  return (
+    <div style={{ padding: "20px 18px 90px" }}>
+      <div style={{ marginBottom: 16 }}>
+        <div style={{ fontSize: 13, color: COLORS.inkSoft }}>{todayLabel()}</div>
+        <h1 style={{ fontFamily: "'Fraunces', Georgia, serif", fontSize: 24, margin: "4px 0 0", fontWeight: 600 }}>
+          Seasons
+        </h1>
+      </div>
+
+      <div style={{ display: "flex", gap: 6, marginBottom: 18 }}>
+        {SEASON_ORDER.map((s) => (
+          <button key={s} onClick={() => setSelected(s)} style={{
+            flex: 1, border: `1px solid ${selected === s ? COLORS.sage : COLORS.line}`,
+            background: selected === s ? COLORS.sage : COLORS.card,
+            color: selected === s ? "#fff" : COLORS.ink,
+            borderRadius: 999, padding: "8px 6px", fontSize: 13, cursor: "pointer",
+          }}>
+            {SEASON_LABELS[s]}
+          </button>
+        ))}
+      </div>
+
+      <div style={{ fontSize: 13, color: COLORS.inkSoft, marginBottom: 14 }}>
+        Crops previously planted in {SEASON_LABELS[selected]}, as a guide to what has worked before.
+      </div>
+
+      {loading && <div style={{ fontSize: 13, color: COLORS.inkSoft }}>Loading planting history…</div>}
+      {!loading && cropsForSeason.length === 0 && (
+        <div style={{ fontSize: 13, color: COLORS.inkSoft }}>
+          Nothing logged for {SEASON_LABELS[selected]} yet. Set a "Planted on" date for a plant group in the
+          Tracker tab and it will appear here in future {SEASON_LABELS[selected].toLowerCase()}s.
+        </div>
+      )}
+
+      <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
+        {cropsForSeason.map((c) => (
+          <div key={c.cropName} style={{
+            background: COLORS.card, border: `1px solid ${COLORS.line}`, borderRadius: 12,
+            padding: "12px 14px", display: "flex", alignItems: "center", justifyContent: "space-between", gap: 10,
+          }}>
+            <span style={{ fontSize: 14, fontWeight: 600 }}>{c.cropName}</span>
+            <span style={{ fontSize: 11.5, color: COLORS.inkSoft, whiteSpace: "nowrap" }}>
+              Planted {c.count} {c.count === 1 ? "time" : "times"} · last{" "}
+              {new Date(c.lastPlanted).toLocaleDateString("en-ZA", { month: "short", year: "numeric" })}
+            </span>
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+/* ===========================================================
+   Harvest screen — logs what's picked and when, split by crop
+   and then by variety, with a running total per crop, ordered
+   from highest yield to lowest.
+=========================================================== */
+function todayDateStr() {
+  return new Date().toISOString().slice(0, 10);
+}
+function formatHarvestDate(ts) {
+  return new Date(ts).toLocaleDateString("en-ZA", { day: "numeric", month: "short", year: "numeric" });
+}
+function summarizeAmounts(entries) {
+  const total = entries.reduce((sum, e) => sum + (Number(e.amount) || 0), 0);
+  const units = Array.from(new Set(entries.map((e) => (e.unit || "kg").trim().toLowerCase())));
+  return { total, unit: units.length === 1 ? entries[0].unit || "kg" : "mixed units", mixedUnits: units.length > 1 };
+}
+function formatAmount(summary) {
+  const rounded = Math.round(summary.total * 100) / 100;
+  return summary.mixedUnits ? `${rounded} (mixed units)` : `${rounded} ${summary.unit}`;
+}
+
+function HarvestScreen({ plantIndexVersion }) {
+  const { plants: trackedPlants } = useGardenPlants(POLL_MS, plantIndexVersion);
+
+  const [log, setLog] = useState([]);
+  const [loadingLog, setLoadingLog] = useState(true);
+  const [selectedPlantId, setSelectedPlantId] = useState("");
+  const [selectedVarietyId, setSelectedVarietyId] = useState("");
+  const [amount, setAmount] = useState("");
+  const [unit, setUnit] = useState("kg");
+  const [dateStr, setDateStr] = useState(todayDateStr());
+  const [formError, setFormError] = useState(null);
+
+  useEffect(() => {
+    let cancelled = false;
+    async function refresh() {
+      const h = await loadHarvestLog();
+      if (!cancelled) { setLog(h); setLoadingLog(false); }
+    }
+    refresh();
+    const interval = setInterval(refresh, POLL_MS);
+    return () => { cancelled = true; clearInterval(interval); };
+  }, [plantIndexVersion]);
+
+  useEffect(() => {
+    if (!selectedPlantId && trackedPlants.length) setSelectedPlantId(trackedPlants[0].id);
+  }, [trackedPlants, selectedPlantId]);
+
+  const selectedPlant = trackedPlants.find((p) => p.id === selectedPlantId) || null;
+  const selectedVarieties = (selectedPlant && selectedPlant.varieties) || [];
+
+  async function handleLogHarvest() {
+    const plant = trackedPlants.find((p) => p.id === selectedPlantId);
+    const amt = parseFloat(amount);
+    if (!plant) { setFormError("Add a plant group in the Tracker tab first."); return; }
+    if (!amount || isNaN(amt) || amt <= 0) { setFormError("Enter an amount greater than 0."); return; }
+    setFormError(null);
+    const variety = selectedVarieties.find((v) => v.id === selectedVarietyId) || null;
+    const ts = dateStr ? new Date(dateStr + "T00:00:00").getTime() : Date.now();
+    const entry = {
+      id: uid(), plantId: plant.id, plantName: plant.name,
+      varietyId: variety ? variety.id : null, varietyName: variety ? variety.name : null,
+      date: ts, amount: amt, unit: unit.trim() || "kg", createdAt: Date.now(),
+    };
+    const updated = await addHarvestEntry(entry);
+    setLog(updated);
+    setAmount("");
+  }
+
+  async function handleDeleteEntry(id) {
+    const updated = await deleteHarvestEntry(id);
+    setLog(updated);
+  }
+
+  const groups = useMemo(() => {
+    const byPlant = new Map();
+    log.forEach((e) => {
+      if (!byPlant.has(e.plantId)) byPlant.set(e.plantId, { plantId: e.plantId, plantName: e.plantName, entries: [], varietyMap: new Map() });
+      const g = byPlant.get(e.plantId);
+      g.entries.push(e);
+      const vKey = e.varietyId || "none";
+      if (!g.varietyMap.has(vKey)) {
+        g.varietyMap.set(vKey, { varietyId: e.varietyId, varietyName: e.varietyName || "General (no variety)", entries: [] });
+      }
+      g.varietyMap.get(vKey).entries.push(e);
+    });
+    return Array.from(byPlant.values())
+      .map((g) => {
+        const varieties = Array.from(g.varietyMap.values())
+          .map((v) => ({ ...v, summary: summarizeAmounts(v.entries), entries: v.entries.slice().sort((a, b) => b.date - a.date) }))
+          .sort((a, b) => b.summary.total - a.summary.total);
+        return {
+          plantId: g.plantId, plantName: g.plantName, varieties,
+          summary: summarizeAmounts(g.entries),
+          startedDate: Math.min(...g.entries.map((e) => e.date)),
+        };
+      })
+      .sort((a, b) => b.summary.total - a.summary.total); // highest yield to lowest
+  }, [log]);
+
+  return (
+    <div style={{ padding: "20px 18px 90px" }}>
+      <div style={{ marginBottom: 16 }}>
+        <div style={{ fontSize: 13, color: COLORS.inkSoft }}>{todayLabel()}</div>
+        <h1 style={{ fontFamily: "'Fraunces', Georgia, serif", fontSize: 24, margin: "4px 0 0", fontWeight: 600 }}>Harvest</h1>
+      </div>
+
+      <Section title="Log a harvest">
+        {trackedPlants.length === 0 ? (
+          <div style={{ fontSize: 13, color: COLORS.inkSoft }}>Add a plant group in the Tracker tab first.</div>
+        ) : (
+          <React.Fragment>
+            <label style={labelStyle}>Crop</label>
+            <select
+              value={selectedPlantId}
+              onChange={(e) => { setSelectedPlantId(e.target.value); setSelectedVarietyId(""); }}
+              style={{ ...inputStyle, marginBottom: 10 }}
+            >
+              {trackedPlants.map((p) => <option key={p.id} value={p.id}>{p.name}</option>)}
+            </select>
+
+            {selectedVarieties.length > 0 && (
+              <React.Fragment>
+                <label style={labelStyle}>Variety (optional)</label>
+                <select value={selectedVarietyId} onChange={(e) => setSelectedVarietyId(e.target.value)} style={{ ...inputStyle, marginBottom: 10 }}>
+                  <option value="">No specific variety</option>
+                  {selectedVarieties.map((v) => <option key={v.id} value={v.id}>{v.name}</option>)}
+                </select>
+              </React.Fragment>
+            )}
+
+            <div style={{ display: "flex", gap: 8, marginBottom: 10 }}>
+              <div style={{ flex: 1 }}>
+                <label style={labelStyle}>Amount</label>
+                <input type="number" min="0" step="0.01" placeholder="e.g. 1.5" value={amount} onChange={(e) => setAmount(e.target.value)} style={inputStyle} />
+              </div>
+              <div style={{ width: 90 }}>
+                <label style={labelStyle}>Unit</label>
+                <input value={unit} onChange={(e) => setUnit(e.target.value)} style={inputStyle} />
+              </div>
+            </div>
+
+            <label style={labelStyle}>Date</label>
+            <input type="date" value={dateStr} onChange={(e) => setDateStr(e.target.value)} style={{ ...inputStyle, marginBottom: 10 }} />
+
+            {formError && <div style={{ fontSize: 12.5, color: COLORS.danger, marginBottom: 10 }}>{formError}</div>}
+            <button onClick={handleLogHarvest} style={btnPrimary}>Log harvest</button>
+          </React.Fragment>
+        )}
+      </Section>
+
+      <Section title="Harvest totals">
+        {loadingLog && <div style={{ fontSize: 13, color: COLORS.inkSoft }}>Loading harvest history…</div>}
+        {!loadingLog && groups.length === 0 && (
+          <div style={{ fontSize: 13, color: COLORS.inkSoft }}>Nothing logged yet — use the form above after your first pick.</div>
+        )}
+        <div style={{ display: "flex", flexDirection: "column", gap: 14 }}>
+          {groups.map((g) => (
+            <div key={g.plantId} style={{ background: "#fff", border: `1px solid ${COLORS.line}`, borderRadius: 12, padding: "12px 14px" }}>
+              <div style={{ display: "flex", alignItems: "baseline", justifyContent: "space-between", gap: 8 }}>
+                <h3 style={{ fontFamily: "'Fraunces', Georgia, serif", fontSize: 15.5, fontWeight: 600, margin: 0 }}>{g.plantName}</h3>
+                <span style={{ fontSize: 12.5, fontWeight: 600, color: COLORS.sage }}>{formatAmount(g.summary)}</span>
+              </div>
+              <div style={{ fontSize: 11.5, color: COLORS.inkSoft, marginTop: 3, marginBottom: 10 }}>
+                Started harvesting {formatHarvestDate(g.startedDate)}
+              </div>
+
+              {g.varieties.map((v) => (
+                <div key={v.varietyId || "none"} style={{ marginBottom: 10 }}>
+                  <div style={{ display: "flex", alignItems: "baseline", justifyContent: "space-between", marginBottom: 6 }}>
+                    <span style={{ fontSize: 13, fontWeight: 600, color: COLORS.inkSoft }}>{v.varietyName}</span>
+                    <span style={{ fontSize: 11.5, color: COLORS.inkSoft }}>{formatAmount(v.summary)}</span>
+                  </div>
+                  <div style={{ display: "flex", flexDirection: "column", gap: 5 }}>
+                    {v.entries.map((e) => (
+                      <div key={e.id} style={{
+                        display: "flex", alignItems: "center", justifyContent: "space-between", gap: 8,
+                        background: COLORS.bg, borderRadius: 8, padding: "6px 10px",
+                      }}>
+                        <span style={{ fontSize: 12, color: COLORS.inkSoft }}>{formatHarvestDate(e.date)}</span>
+                        <span style={{ fontSize: 13, fontWeight: 600 }}>{e.amount} {e.unit}</span>
+                        <button onClick={() => handleDeleteEntry(e.id)} style={{ background: "none", border: "none", color: COLORS.inkSoft, cursor: "pointer", fontSize: 14, lineHeight: 1 }}>×</button>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              ))}
+
+              <div style={{ display: "flex", justifyContent: "space-between", paddingTop: 8, borderTop: `1px solid ${COLORS.line}` }}>
+                <span style={{ fontSize: 12.5, fontWeight: 600 }}>Total {g.plantName}</span>
+                <span style={{ fontSize: 12.5, fontWeight: 700, color: COLORS.clay }}>{formatAmount(g.summary)}</span>
+              </div>
+            </div>
+          ))}
+        </div>
+      </Section>
+    </div>
+  );
+}
+
+/* ===========================================================
+   App shell — bottom nav between Home and Tracker
+=========================================================== */
+function NavIcon({ kind, active }) {
+  const color = active ? COLORS.sage : COLORS.inkSoft;
+  if (kind === "home") {
+    return (
+      <svg width="22" height="22" viewBox="0 0 24 24" fill="none">
+        <path d="M4 11 L12 4 L20 11 V20 H14 V14 H10 V20 H4 Z" stroke={color} strokeWidth="1.8" strokeLinejoin="round" fill="none" />
+      </svg>
+    );
+  }
+  if (kind === "seasons") {
+    return (
+      <svg width="22" height="22" viewBox="0 0 24 24" fill="none">
+        <circle cx="12" cy="12" r="7.5" stroke={color} strokeWidth="1.8" fill="none" />
+        <line x1="12" y1="3.5" x2="12" y2="7" stroke={color} strokeWidth="1.8" strokeLinecap="round" />
+        <line x1="12" y1="17" x2="12" y2="20.5" stroke={color} strokeWidth="1.8" strokeLinecap="round" />
+        <line x1="3.5" y1="12" x2="7" y2="12" stroke={color} strokeWidth="1.8" strokeLinecap="round" />
+        <line x1="17" y1="12" x2="20.5" y2="12" stroke={color} strokeWidth="1.8" strokeLinecap="round" />
+      </svg>
+    );
+  }
+  if (kind === "harvest") {
+    return (
+      <svg width="22" height="22" viewBox="0 0 24 24" fill="none">
+        <path d="M5 10 H19 L17 20 H7 Z" stroke={color} strokeWidth="1.8" strokeLinejoin="round" fill="none" />
+        <path d="M9 10 C9 6 15 6 15 10" stroke={color} strokeWidth="1.8" fill="none" strokeLinecap="round" />
+        <line x1="9" y1="13" x2="9.5" y2="17" stroke={color} strokeWidth="1.4" strokeLinecap="round" />
+        <line x1="12" y1="13" x2="12" y2="17" stroke={color} strokeWidth="1.4" strokeLinecap="round" />
+        <line x1="15" y1="13" x2="14.5" y2="17" stroke={color} strokeWidth="1.4" strokeLinecap="round" />
+      </svg>
+    );
+  }
+  return (
+    <svg width="22" height="22" viewBox="0 0 24 24" fill="none">
+      <path d="M12 20 V10" stroke={color} strokeWidth="1.8" strokeLinecap="round" />
+      <path d="M12 12 C12 7 8 6 5 6 C5 10 7 12 12 12 Z" fill={color} opacity="0.85" />
+      <path d="M12 10 C12 6 16 5 19 5 C19 9 16 11 12 10 Z" fill={color} opacity="0.55" />
+    </svg>
+  );
+}
+
+function FileProtocolWarning() {
+  return (
+    <div style={{
+      background: "#FBEFE8", border: `1px solid ${COLORS.clay}`, borderRadius: 12,
+      padding: "12px 14px", margin: "14px 18px 0", fontSize: 12.5, color: COLORS.ink, lineHeight: 1.5,
+    }}>
+      <strong style={{ color: COLORS.clay }}>Saving is disabled right now.</strong> This page was opened as a local
+      file, and browsers block on-device storage for local files. Host this file online (even a free static host)
+      and open it from that https:// link instead — then saving will work normally.
+    </div>
+  );
+}
+
+function App() {
+  const [tab, setTab] = useState("home");
+  const [plantIndexVersion, setPlantIndexVersion] = useState(0);
+  const isFileProtocol = typeof window !== "undefined" && window.location.protocol === "file:";
+
+  return (
+    <div style={{ minHeight: "100vh", background: COLORS.bg, fontFamily: "'Work Sans', system-ui, sans-serif", color: COLORS.ink }}>
+      {isFileProtocol && <FileProtocolWarning />}
+      <div style={{ maxWidth: 460, margin: "0 auto" }}>
+        {tab === "home" && <HomeScreen plantIndexVersion={plantIndexVersion} />}
+        {tab === "seasons" && <SeasonsScreen plantIndexVersion={plantIndexVersion} />}
+        {tab === "tracker" && <TrackerScreen onPlantsChanged={() => setPlantIndexVersion((v) => v + 1)} />}
+        {tab === "harvest" && <HarvestScreen plantIndexVersion={plantIndexVersion} />}
+      </div>
+
+      <div style={{
+        position: "fixed", left: 0, right: 0, bottom: 0,
+        background: COLORS.card, borderTop: `1px solid ${COLORS.line}`,
+        display: "flex", justifyContent: "center",
+        paddingBottom: "env(safe-area-inset-bottom, 0px)",
+      }}>
+        <div style={{ display: "flex", width: "100%", maxWidth: 460 }}>
+          {[{ key: "home", label: "Home" }, { key: "seasons", label: "Seasons" }, { key: "tracker", label: "Tracker" }, { key: "harvest", label: "Harvest" }].map((t) => (
+            <button key={t.key} onClick={() => setTab(t.key)} style={{
+              flex: 1, background: "none", border: "none", padding: "10px 0 8px",
+              display: "flex", flexDirection: "column", alignItems: "center", gap: 3, cursor: "pointer",
+            }}>
+              <NavIcon kind={t.key} active={tab === t.key} />
+              <span style={{ fontSize: 11.5, color: tab === t.key ? COLORS.sage : COLORS.inkSoft, fontWeight: tab === t.key ? 600 : 400 }}>
+                {t.label}
+              </span>
+            </button>
+          ))}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+ReactDOM.createRoot(document.getElementById("root")).render(<App />);
+</script>
+</body>
+</html>
